@@ -1,0 +1,26 @@
+# Python 编译缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Streamlit 运行缓存
+.streamlit/
+
+# 本地生成的报表文件（测试导出的Excel不上传）
+*.xlsx
+*.csv
+*.xls
+
+# 日志文件
+*.log
+
+# 系统自带隐藏文件
+.DS_Store
+Thumbs.db
+
+# 编辑器缓存（VSCode、记事本等）
+.vscode/
+.idea/
+*.swp
+*.swo
