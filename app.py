@@ -1,486 +1,469 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import io
-import re
 from datetime import datetime
-import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-import unicodedata
 
-# ===================== 全局工具函数 =====================
-def display_width(text):
-    """计算单元格文本宽度，适配中英文"""
-    return sum(2 if unicodedata.east_asian_width(c) in ('F','W') else 1 for c in str(text or ''))
+# ---------------------- 全局映射字典 ----------------------
+bid_name_map = {
+    "Fixed bid": "固定竞价",
+    "Dynamic bids - up and down": "提高和降低",
+    "Dynamic bids - down only": "仅降低"
+}
+placement_name_map = {
+    "Placement Amazon Business": "企业购广告位",
+    "Placement Rest Of Search": "搜索结果的其余位置",
+    "Placement Product Page": "商品页面",
+    "Placement Top": "搜索结果顶部（首页）"
+}
+entity_map = {
+    "Campaign": "广告活动",
+    "Bidding Adjustment": "广告位调价",
+    "Ad Group": "广告组",
+    "Product Ad": "商品广告",
+    "Product Targeting": "ASIN定位投放",
+    "Keyword": "投放关键词",
+    "Negative Keyword": "否定关键词",
+    "Negative Product Targeting": "否定ASIN",
+    "Campaign Negative Keyword": "广告活动否定关键词"
+}
+status_map = {
+    "enabled": "已启用",
+    "paused": "已暂停",
+    "Eligible": "符合条件",
+    "Data not available": "数据不可用",
+    "Ineligible for ad creation": "不符合条件"
+}
+match_type_map = {
+    "Broad": "广泛",
+    "Phrase": "词组",
+    "Exact": "精准",
+    "Negative Phrase": "否定词组",
+    "Negative Exact": "否定精准",
+    "None": "无"
+}
 
-def auto_fit_columns(ws, min_w=8, max_w=50, padding=3):
-    """自动自适应列宽，无MergedCell判断避免报错"""
-    for col_cells in ws.columns:
-        letter = col_cells[0].column_letter
-        w = max((display_width(c.value) for c in col_cells if c.value is not None), default=0)
-        ws.column_dimensions[letter].width = max(min_w, min(w * 1.1 + padding, max_w))
+# 页面基础配置
+st.set_page_config(page_title="亚马逊SP广告数据看板", layout="wide", page_icon="📊")
+st.markdown("""
+<style>
+    .metric-box {background:#f0f7ff;padding:16px;border-radius:12px;border-left:5px #1677ff solid;text-align:center;}
+    .block-title {font-size:14px;font-weight:bold;background:#f5f7f9;padding:8px;border-radius:4px;margin-top:12px;}
+    .search-bottom-panel {margin-top:20px;border-top:2px solid #ddd;padding-top:20px;}
+</style>
+""", unsafe_allow_html=True)
 
-def extract_asin_from_targeting(text):
-    """Python端精准提取双引号内的ASIN值，适配所有格式"""
-    if pd.isna(text) or str(text).strip() == "":
-        return ""
-    match = re.search(r'asin\s*=\s*[“"](.*?)[”"]', str(text), re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    match_fallback = re.search(r'[“"](.*?)[”"]', str(text))
-    if match_fallback:
-        return match_fallback.group(1).strip()
-    return ""
+# 会话缓存初始化（新增存储关键词三重匹配字段）
+if "df_ad" not in st.session_state:
+    st.session_state.df_ad = None
+if "df_search" not in st.session_state:
+    st.session_state.df_search = None
+if "sel_campaign_name" not in st.session_state:
+    st.session_state.sel_campaign_name = ""
+# 三重匹配缓存
+if "sel_keyword_text" not in st.session_state:
+    st.session_state.sel_keyword_text = ""
+if "sel_match_type_raw" not in st.session_state:
+    st.session_state.sel_match_type_raw = ""
 
-# Excel全局格式定义
-HEADER_FILL = PatternFill('solid', fgColor='F2F2F2')
-HEADER_FONT = Font(bold=True, size=11)
-CENTER_ALIGN = Alignment(horizontal='center', vertical='center')
-LEFT_ALIGN = Alignment(horizontal='left', vertical='center')
-THIN_BORDER = Border(top=Side('thin'), bottom=Side('thin'), left=Side('thin'), right=Side('thin'))
-NUMBER_FMT = '0.00'
-PCT_FMT = '0.00%'
+# ===================== 页面顶部：主标题 + 文件上传 =====================
+st.title("📊 亚马逊SP广告看板｜原始明细匹配工具")
+st.divider()
 
-# ===================== 初始化默认配置【条件调整+新增精准广告高ACOS工作表】 =====================
-def get_default_sheet_config():
-    # 通用输出字段（前两个Sheet共用）
-    common_output_cols = [
-        'ASIN (Informational only)',
-        'SKU',
-        'Campaign Name (Informational only)',
-        'Bidding Strategy',
-        'Placement',
-        'Percentage',
-        'Impressions',
-        'Clicks',
-        'Click-through Rate',
-        'Spend',
-        'Sales',
-        'Orders',
-        'Units',
-        'Conversion Rate',
-        'ACOS',
-        'CPC',
-        'ROAS'
-    ]
-    # 定位广告类Sheet通用输出字段（永久移除Placement、Percentage列）
-    targeting_output_cols = [
-        'ASIN (Informational only)',
-        'SKU',
-        'Campaign Name (Informational only)',
-        'Campaign State (Informational only)',
-        'Ad Group Name (Informational only)',
-        'State',
-        'Bidding Strategy',
-        'Product Targeting Expression',
-        'Bid',
-        'Impressions',
-        'Clicks',
-        'Click-through Rate',
-        'Spend',
-        'Sales',
-        'Orders',
-        'Units',
-        'Conversion Rate',
-        'ACOS',
-        'CPC',
-        'ROAS'
-    ]
-    # 精准广告类Sheet通用输出字段（严格按指定顺序）
-    keyword_output_cols = [
-        'ASIN (Informational only)',
-        'SKU',
-        'Campaign Name (Informational only)',
-        'Ad Group Name (Informational only)',
-        'State',
-        'Bidding Strategy',
-        'Keyword Text',
-        'Campaign State (Informational only)',
-        'Bid',
-        'Impressions',
-        'Clicks',
-        'Click-through Rate',
-        'Spend',
-        'Sales',
-        'Orders',
-        'Units',
-        'Conversion Rate',
-        'ACOS',
-        'CPC',
-        'ROAS'
-    ]
-    return [
-        # Sheet1：广告位无效点击
-        {
-            "sheet_name": "广告位无效点击",
-            "filter_rules": [
-                {"col": "Entity", "op": "等于", "val": "Bidding Adjustment"},
-                {"col": "ACOS", "op": "等于", "val": "0"},
-                {"col": "Clicks", "op": "大于", "val": "10"}
-            ],
-            "output_cols": common_output_cols,
-            "match_campaign_asin_sku": True,
-            "sort_by": "Spend",
-            "sort_ascending": False,
-            "is_targeting_sheet": False,
-            "only_match_bidding": False
-        },
-        # Sheet2：广告位ACOS高
-        {
-            "sheet_name": "广告位ACOS高",
-            "filter_rules": [
-                {"col": "Entity", "op": "等于", "val": "Bidding Adjustment"},
-                {"col": "ACOS", "op": "大于", "val": "0.4"}
-            ],
-            "output_cols": common_output_cols,
-            "match_campaign_asin_sku": True,
-            "sort_by": "Spend",
-            "sort_ascending": False,
-            "is_targeting_sheet": False,
-            "only_match_bidding": False
-        },
-        # Sheet3：定位广告无效点击
-        {
-            "sheet_name": "定位广告无效点击",
-            "filter_rules": [
-                {"col": "Entity", "op": "等于", "val": "Product Targeting"},
-                {"col": "Product Targeting Expression", "op": "包含", "val": "asin"},
-                {"col": "ACOS", "op": "等于", "val": "0"},
-                {"col": "Clicks", "op": "大于", "val": "10"}
-            ],
-            "output_cols": targeting_output_cols,
-            "match_campaign_asin_sku": True,
-            "sort_by": "Spend",
-            "sort_ascending": False,
-            "is_targeting_sheet": True,
-            "only_match_bidding": True
-        },
-        # Sheet4：定位广告高ACOS
-        {
-            "sheet_name": "定位广告高ACOS",
-            "filter_rules": [
-                {"col": "Entity", "op": "等于", "val": "Product Targeting"},
-                {"col": "Product Targeting Expression", "op": "包含", "val": "asin"},
-                {"col": "ACOS", "op": "大于", "val": "0.4"}
-            ],
-            "output_cols": targeting_output_cols,
-            "match_campaign_asin_sku": True,
-            "sort_by": "Spend",
-            "sort_ascending": False,
-            "is_targeting_sheet": True,
-            "only_match_bidding": True
-        },
-        # Sheet5：定位广告0点击低曝光
-        {
-            "sheet_name": "定位广告0点击低曝光",
-            "filter_rules": [
-                {"col": "Entity", "op": "等于", "val": "Product Targeting"},
-                {"col": "Product Targeting Expression", "op": "包含", "val": "asin"},
-                {"col": "Impressions", "op": "大于等于", "val": "0"},
-                {"col": "Impressions", "op": "小于等于", "val": "100"},
-                {"col": "Clicks", "op": "等于", "val": "0"}
-            ],
-            "output_cols": targeting_output_cols,
-            "match_campaign_asin_sku": True,
-            "sort_by": "Impressions",
-            "sort_ascending": False,
-            "is_targeting_sheet": True,
-            "only_match_bidding": True
-        },
-        # Sheet6：精准广告无效点击【条件修改：Clicks≥5】
-        {
-            "sheet_name": "精准广告无效点击",
-            "filter_rules": [
-                {"col": "Entity", "op": "等于", "val": "Keyword"},
-                {"col": "Match Type", "op": "等于", "val": "Exact"},
-                {"col": "ACOS", "op": "等于", "val": "0"},
-                {"col": "Clicks", "op": "大于等于", "val": "5"}
-            ],
-            "output_cols": keyword_output_cols,
-            "match_campaign_asin_sku": True,
-            "sort_by": "Spend",
-            "sort_ascending": False,
-            "is_targeting_sheet": False,
-            "only_match_bidding": False
-        },
-        # Sheet7：精准广告高ACOS【新增工作表】
-        {
-            "sheet_name": "精准广告高ACOS",
-            "filter_rules": [
-                {"col": "Entity", "op": "等于", "val": "Keyword"},
-                {"col": "Match Type", "op": "等于", "val": "Exact"},
-                {"col": "ACOS", "op": "大于", "val": "0.4"}
-            ],
-            "output_cols": keyword_output_cols,
-            "match_campaign_asin_sku": True,
-            "sort_by": "Spend",
-            "sort_ascending": False,
-            "is_targeting_sheet": False,
-            "only_match_bidding": False
-        }
-    ]
-
-# 会话初始化
-st.set_page_config(page_title="亚马逊SP广告自定义报表工具 v4.1", layout="wide")
-if 'sp_df' not in st.session_state:
-    st.session_state.sp_df = None
-if 'sheet_config_list' not in st.session_state:
-    st.session_state.sheet_config_list = get_default_sheet_config()
-
-# ===================== 页面标题与安全提示 =====================
-st.title("📊 亚马逊SP广告自定义报表生成工具")
-st.caption("数据源：Sponsored Products Campaigns 广告报表 | 固定内置匹配逻辑，无需手动开关")
-st.info("🛡️ **数据安全承诺**：所有文件仅本地内存处理，不上传服务器，关闭页面数据立即销毁")
-st.markdown("---")
-
-# ===================== 左侧侧边栏配置面板【Sheet默认关闭展开】 =====================
-with st.sidebar:
-    st.header("⚙️ Sheet自定义配置面板")
-    st.divider()
-
-    # 新增Sheet按钮
-    add_sheet_btn = st.button("➕ 新增一个分析Sheet", use_container_width=True)
-    if add_sheet_btn:
-        st.session_state.sheet_config_list.append({
-            "sheet_name": "新建Sheet",
-            "filter_rules": [],
-            "output_cols": [],
-            "match_campaign_asin_sku": True,
-            "sort_by": "Spend",
-            "sort_ascending": False,
-            "is_targeting_sheet": False,
-            "only_match_bidding": False
-        })
-
-    # 循环渲染每个Sheet配置【默认关闭展开】
-    delete_idx_list = []
-    for idx, sheet_cfg in enumerate(st.session_state.sheet_config_list):
-        with st.expander(f"Sheet {idx+1}：{sheet_cfg['sheet_name']}", expanded=False):
-            # 1. 修改Sheet名称
-            sheet_cfg["sheet_name"] = st.text_input("Sheet工作表名称", value=sheet_cfg["sheet_name"], key=f"sheet_name_{idx}")
-
-            # 固定逻辑提示
-            st.caption("固定逻辑：自动按CampaignID匹配多ASIN/SKU分行输出；定位广告Sheet自动生成亚马逊超链接、仅匹配Bidding Strategy字段")
-            st.divider()
-
-            # 2. 排序配置
-            st.subheader("排序配置")
-            sort_col_in, sort_order_in = st.columns([3, 2])
-            sheet_cfg["sort_by"] = sort_col_in.text_input("排序字段", value=sheet_cfg["sort_by"], key=f"sort_by_{idx}")
-            sort_order = sort_order_in.selectbox("排序顺序", ["降序", "升序"], index=0 if not sheet_cfg["sort_ascending"] else 1, key=f"sort_order_{idx}")
-            sheet_cfg["sort_ascending"] = sort_order == "升序"
-
-            # 3. 筛选条件配置
-            st.subheader("筛选条件配置")
-            add_filter_btn = st.button(f"添加筛选条件 #{idx}", key=f"add_filter_{idx}")
-            if add_filter_btn:
-                sheet_cfg["filter_rules"].append({"col": "", "op": "等于", "val": ""})
-            del_filter_idx = []
-            for f_idx, rule in enumerate(sheet_cfg["filter_rules"]):
-                col_in, op_in, val_in = st.columns([3, 2, 3])
-                rule["col"] = col_in.text_input("字段", value=rule["col"], key=f"f_col_{idx}_{f_idx}")
-                rule["op"] = op_in.selectbox("运算符", ["等于", "大于", "小于", "大于等于", "小于等于", "包含"], index=["等于", "大于", "小于", "大于等于", "小于等于", "包含"].index(rule["op"]), key=f"f_op_{idx}_{f_idx}")
-                rule["val"] = val_in.text_input("值", value=rule["val"], key=f"f_val_{idx}_{f_idx}")
-                if st.button(f"删除本条条件", key=f"del_f_{idx}_{f_idx}"):
-                    del_filter_idx.append(f_idx)
-            for f_idx in sorted(del_filter_idx, reverse=True):
-                del sheet_cfg["filter_rules"][f_idx]
-
-            # 4. 输出表头配置
-            st.subheader("输出表头（逗号分隔字段）")
-            cols_text = ", ".join(sheet_cfg["output_cols"])
-            input_cols_text = st.text_area("填写输出字段，英文逗号分隔", value=cols_text, height=120, key=f"output_cols_{idx}")
-            clean_text = input_cols_text.replace("\n", "").replace("\t", "")
-            sheet_cfg["output_cols"] = [c.strip() for c in clean_text.split(",") if c.strip()]
-
-            # 5. 删除当前Sheet按钮
-            if st.button(f"🗑️ 删除【{sheet_cfg['sheet_name']}】", type="secondary", key=f"del_sheet_{idx}"):
-                delete_idx_list.append(idx)
-    for del_idx in sorted(delete_idx_list, reverse=True):
-        del st.session_state.sheet_config_list[del_idx]
-
-    st.divider()
-    st.info("操作说明：\n1. 可自定义筛选、排序、输出字段\n2. 内置固定逻辑无需手动开关\n3. 定位广告报表不含Placement/Percentage列")
-
-# ===================== 文件上传模块 =====================
-st.header("📁 上传亚马逊SP广告 xlsx 报表")
-upload_file = st.file_uploader("仅支持包含 Sponsored Products Campaigns 工作表的xlsx文件", type=["xlsx"], key="sp_upload")
-
-if upload_file:
+upload_xlsx = st.file_uploader("上传Excel文件（Sponsored Products Campaigns + SP Search Term Report）", type=["xlsx"])
+if upload_xlsx:
     try:
-        all_sheet_dict = pd.read_excel(upload_file, sheet_name=None)
-        sheet_name_list = list(all_sheet_dict.keys())
-        if "Sponsored Products Campaigns" not in sheet_name_list:
-            st.error("❌ 文件缺少工作表：Sponsored Products Campaigns，请核对报表！")
-            st.stop()
-        df_sp = all_sheet_dict["Sponsored Products Campaigns"]
-        df_sp.columns = df_sp.columns.astype(str).str.strip()
-        st.session_state.sp_df = df_sp
-        st.success(f"✅ 报表读取成功，共 {len(df_sp)} 行投放数据")
-        st.markdown("### 原始数据预览（前10行）")
-        st.dataframe(df_sp.head(10), use_container_width=True)
+        sheets = pd.read_excel(upload_xlsx, sheet_name=None)
+        # 广告活动数据表
+        if "Sponsored Products Campaigns" in sheets:
+            df_raw = sheets["Sponsored Products Campaigns"]
+            df_raw.columns = df_raw.columns.str.strip()
+            num_cols = ["Impressions","Clicks","Spend","Sales","Orders","Units","Percentage","Bid","Click-through Rate","Conversion Rate","ACOS","CPC","ROAS"]
+            for c in num_cols:
+                if c in df_raw.columns:
+                    df_raw[c] = pd.to_numeric(df_raw[c], errors="coerce").fillna(0)
+            df_raw["Ad Group Name (Informational only)"] = df_raw["Ad Group Name (Informational only)"].fillna("无广告组")
+            st.session_state.df_ad = df_raw
+            st.success("✅ 广告明细加载完成")
+        else:
+            st.error("缺少工作表：Sponsored Products Campaigns")
+        # 客户搜索词数据表
+        df_search = None
+        if "SP Search Term Report" in sheets:
+            df_search = sheets["SP Search Term Report"]
+            df_search.columns = [col.strip() for col in df_search.columns]
+            search_num = ["Impressions","Clicks","Spend","Sales","Orders","Units","Click-through Rate","Conversion Rate","ACOS","CPC","ROAS"]
+            for c in search_num:
+                if c in df_search.columns:
+                    df_search[c] = pd.to_numeric(df_search[c], errors="coerce").fillna(0)
+            st.session_state.df_search = df_search
+            st.success("✅ 搜索词报表加载完成")
+        else:
+            st.warning("未上传SP Search Term Report，搜索词模块隐藏")
+        st.divider()
     except Exception as e:
         st.error(f"文件读取失败：{str(e)}")
-        st.stop()
 
-# ===================== 数据筛选工具函数 =====================
-def filter_data_by_rules(df, filter_rules):
-    mask = np.ones(len(df), dtype=bool)
-    for rule in filter_rules:
-        col_name = rule["col"].strip()
-        op = rule["op"]
-        val = rule["val"].strip()
-        if not col_name or not val or col_name not in df.columns:
-            continue
-        # 数值转换
-        try:
-            num_val = float(val)
-            df_col = pd.to_numeric(df[col_name], errors="coerce")
-        except:
-            num_val = None
-            df_col = df[col_name].astype(str).str.strip()
+df_ad = st.session_state.df_ad
+df_search = st.session_state.df_search
 
-        # 运算符逻辑处理
-        if op == "等于":
-            mask = mask & (df_col == num_val if num_val is not None else df_col == val)
-        elif op == "大于" and num_val is not None:
-            mask = mask & (df_col > num_val)
-        elif op == "小于" and num_val is not None:
-            mask = mask & (df_col < num_val)
-        elif op == "大于等于" and num_val is not None:
-            mask = mask & (df_col >= num_val)
-        elif op == "小于等于" and num_val is not None:
-            mask = mask & (df_col <= num_val)
-        elif op == "包含":
-            mask = mask & df_col.str.contains(val, na=False)
-    return df[mask].copy()
+# 全局统一百分比格式化函数
+def format_percent(x):
+    if pd.isna(x) or x == 0:
+        return "0.00%"
+    return f"{x:.2%}"
 
-# ===================== 报表生成主逻辑 =====================
-if st.session_state.sp_df is not None:
-    st.markdown("---")
-    st.subheader("当前待生成Sheet清单预览")
-    sheet_info_text = ""
-    for idx, cfg in enumerate(st.session_state.sheet_config_list):
-        sheet_info_text += f"{idx+1}. Sheet名称：{cfg['sheet_name']} | 输出字段数量：{len(cfg['output_cols'])}\n"
-    st.text_area("配置汇总", value=sheet_info_text, height=150, disabled=True)
+if df_ad is not None:
+    # ===================== 一、投放总览（顶部，仅统计Entity=Campaign，两行3卡片） =====================
+    st.subheader("一、投放总览（全局合计）")
+    filter_df = df_ad.copy()
+    camp_only_data = filter_df[filter_df["Entity"] == "Campaign"].copy()
+    sum_imp = camp_only_data["Impressions"].sum()
+    sum_click = camp_only_data["Clicks"].sum()
+    sum_spend = camp_only_data["Spend"].sum()
+    sum_sales = camp_only_data["Sales"].sum()
+    sum_order = camp_only_data["Orders"].sum()
 
-    run_btn = st.button("🚀 一键生成全部自定义Excel报表", type="primary", use_container_width=True)
-    if run_btn:
-        with st.spinner("正在生成Excel报表，请勿操作页面，完成后自动出现下载按钮"):
-            df_origin = st.session_state.sp_df.copy()
-            output_buf = io.BytesIO()
-            try:
-                with pd.ExcelWriter(output_buf, engine="openpyxl", mode="w") as writer:
-                    for sheet_cfg in st.session_state.sheet_config_list:
-                        sheet_name = sheet_cfg["sheet_name"]
-                        filter_rules = sheet_cfg["filter_rules"]
-                        output_cols = sheet_cfg["output_cols"]
-                        match_asin = sheet_cfg["match_campaign_asin_sku"]
-                        sort_by = sheet_cfg["sort_by"]
-                        sort_asc = sheet_cfg["sort_ascending"]
-                        is_targeting = sheet_cfg["is_targeting_sheet"]
-                        only_match_bid = sheet_cfg["only_match_bidding"]
+    # 比率指标重新计算
+    ctr = sum_click / sum_imp if sum_imp > 0 else 0
+    cvr = sum_order / sum_click if sum_click > 0 else 0
+    acos = sum_spend / sum_sales if sum_sales > 0 else 0
+    roas = sum_sales / sum_spend if sum_spend > 0 else 0
 
-                        if not sheet_name or len(output_cols) == 0:
-                            st.warning(f"跳过无效配置Sheet：{sheet_name}（未填写名称或输出字段）")
-                            continue
+    row1 = st.columns(3)
+    with row1[0]:
+        st.markdown(f"<div class='metric-box'><div>总曝光</div><div style='font-size:24px;font-weight:bold'>{int(sum_imp):,}</div></div>", unsafe_allow_html=True)
+    with row1[1]:
+        st.markdown(f"<div class='metric-box'><div>总点击</div><div style='font-size:24px;font-weight:bold'>{int(sum_click):,}</div></div>", unsafe_allow_html=True)
+    with row1[2]:
+        st.markdown(f"<div class='metric-box'><div>总花费</div><div style='font-size:24px;font-weight:bold'>${sum_spend:,.2f}</div></div>", unsafe_allow_html=True)
+    row2 = st.columns(3)
+    with row2[0]:
+        st.markdown(f"<div class='metric-box'><div>总销售额</div><div style='font-size:24px;font-weight:bold'>${sum_sales:,.2f}</div></div>", unsafe_allow_html=True)
+    with row2[1]:
+        st.markdown(f"<div class='metric-box'><div>整体ACOS</div><div style='font-size:24px;font-weight:bold'>{format_percent(acos)}</div></div>", unsafe_allow_html=True)
+    with row2[2]:
+        st.markdown(f"<div class='metric-box'><div>ROAS</div><div style='font-size:24px;font-weight:bold'>{roas:.2f}</div></div>", unsafe_allow_html=True)
+    st.divider()
 
-                        ws = writer.book.create_sheet(sheet_name)
-                        # 写入表头
-                        for col_idx, col_name in enumerate(output_cols, start=1):
-                            cell = ws.cell(row=1, column=col_idx, value=col_name)
-                            cell.font = HEADER_FONT
-                            cell.fill = HEADER_FILL
-                            cell.alignment = CENTER_ALIGN
-                            cell.border = THIN_BORDER
+    # ===================== 二、广告筛选（三控件同一行） =====================
+    st.subheader("二、广告筛选")
+    col_name, col_entity, col_state = st.columns([4, 2, 2])
+    # 实体类型下拉：全部 / 广告活动 / 广告组合
+    with col_entity:
+        entity_sel_cn = st.selectbox("实体类型", ["全部", "广告活动", "广告组合"])
+    with col_name:
+        # 根据实体下拉切换检索提示
+        if entity_sel_cn == "广告活动":
+            filter_text = st.text_input("名称检索（广告活动）")
+        elif entity_sel_cn == "广告组合":
+            filter_text = st.text_input("名称检索（广告组合）")
+        else:
+            filter_text = st.text_input("名称检索（全部实体通用）")
+    # 投放状态下拉：中文展示，映射后台英文
+    with col_state:
+        state_cn_list = ["全部", "已启用", "已暂停"]
+        state_sel_cn = st.selectbox("投放状态", state_cn_list)
+        # 映射后台真实字段值
+        if state_sel_cn == "已启用":
+            state_sel = "enabled"
+        elif state_sel_cn == "已暂停":
+            state_sel = "paused"
+        else:
+            state_sel = "全部"
 
-                        filter_df = filter_data_by_rules(df_origin, filter_rules)
-                        final_rows = []
+    # 执行筛选逻辑
+    filter_df = df_ad.copy()
+    # 实体过滤
+    if entity_sel_cn == "广告活动":
+        filter_df = filter_df[filter_df["Entity"] == "Campaign"]
+    elif entity_sel_cn == "广告组合":
+        pass
+    # 名称检索过滤
+    if filter_text.strip() != "":
+        if entity_sel_cn == "广告活动":
+            filter_df = filter_df[filter_df["Campaign Name (Informational only)"].str.contains(filter_text, na=False, case=False)]
+        elif entity_sel_cn == "广告组合":
+            filter_df = filter_df[filter_df["Portfolio Name (Informational only)"].astype(str).str.contains(filter_text, na=False, case=False)]
+    # 投放状态过滤
+    if state_sel != "全部":
+        filter_df = filter_df[filter_df["State"] == state_sel]
+    st.divider()
 
-                        # 按Campaign匹配ASIN/SKU逻辑
-                        if match_asin:
-                            for _, line in filter_df.iterrows():
-                                if "Campaign ID" not in df_origin.columns:
-                                    final_rows.append(line)
-                                    continue
-                                cid = line["Campaign ID"]
-                                match_group = df_origin[df_origin["Campaign ID"] == cid]
-                                asin_sku_pairs = match_group[["ASIN (Informational only)", "SKU"]].dropna().drop_duplicates()
-                                if len(asin_sku_pairs) == 0:
-                                    continue
-                                # 匹配字段处理
-                                campaign_bid = match_group["Bidding Strategy"].dropna().iloc[0] if not match_group["Bidding Strategy"].dropna().empty else ""
-                                campaign_state = match_group["Campaign State (Informational only)"].dropna().iloc[0] if not match_group["Campaign State (Informational only)"].dropna().empty else ""
-                                ad_group_state = match_group["State"].dropna().iloc[0] if not match_group["State"].dropna().empty else ""
-                                ad_group_name = match_group["Ad Group Name (Informational only)"].dropna().iloc[0] if not match_group["Ad Group Name (Informational only)"].dropna().empty else ""
-                                # 精准广告Sheet补充Keyword Text匹配
-                                keyword_text = match_group["Keyword Text"].dropna().iloc[0] if "Keyword Text" in match_group.columns and not match_group["Keyword Text"].dropna().empty else ""
+    # ===================== 三、广告活动总表（默认Spend花费降序） =====================
+    campaign_df = filter_df[filter_df["Entity"] == "Campaign"].copy()
+    campaign_df = campaign_df.sort_values("Spend", ascending=False, ignore_index=True)
+    disp_raw = campaign_df.copy()
+    disp_raw["Daily Budget"] = disp_raw["Daily Budget"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "$0.00")
+    disp_raw["Spend"] = disp_raw["Spend"].apply(lambda x: f"${x:.2f}")
+    disp_raw["Sales"] = disp_raw["Sales"].apply(lambda x: f"${x:.2f}")
+    disp_raw["CPC"] = disp_raw["CPC"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "$0.00")
+    disp_raw["Click-through Rate"] = disp_raw["Click-through Rate"].apply(format_percent)
+    disp_raw["Conversion Rate"] = disp_raw["Conversion Rate"].apply(format_percent)
+    disp_raw["ACOS"] = disp_raw["ACOS"].apply(format_percent)
+    disp_raw["ROAS"] = disp_raw["ROAS"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "0.00")
+    disp_raw["Bidding Strategy"] = disp_raw["Bidding Strategy"].map(bid_name_map).fillna(disp_raw["Bidding Strategy"])
+    disp_raw["State"] = disp_raw["State"].map(status_map).fillna(disp_raw["State"])
 
-                                for _, pair in asin_sku_pairs.iterrows():
-                                    new_line = line.copy()
-                                    new_line["ASIN (Informational only)"] = pair["ASIN (Informational only)"]
-                                    new_line["SKU"] = pair["SKU"]
-                                    new_line["Bidding Strategy"] = campaign_bid
-                                    new_line["Campaign State (Informational only)"] = campaign_state
-                                    new_line["State"] = ad_group_state
-                                    new_line["Ad Group Name (Informational only)"] = ad_group_name
-                                    new_line["Keyword Text"] = keyword_text
-                                    # 仅匹配Bidding模式下清空Placement、Percentage
-                                    if only_match_bid:
-                                        new_line["Placement"] = ""
-                                        new_line["Percentage"] = ""
-                                    final_rows.append(new_line)
-                        else:
-                            final_rows = filter_df.to_dict("records")
+    camp_show_cols = [
+        "Portfolio Name (Informational only)",
+        "Campaign Name (Informational only)","State","Daily Budget","Bidding Strategy",
+        "Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"
+    ]
+    camp_display = disp_raw[camp_show_cols].copy()
+    camp_display.columns = [
+        "广告组合", "广告活动名称","投放状态","日预算($)","竞价策略",
+        "总曝光","总点击","点击率","花费($)","销售额($)","订单量","Units","转化率","ACOS","CPC","ROAS"
+    ]
+    st.subheader("三、广告活动总表（单击单行查看下方分层明细）")
+    cfg_campaign = {col: st.column_config.Column(width="stretch") for col in camp_display.columns}
+    camp_select = st.dataframe(
+        camp_display,
+        use_container_width=True,
+        height=400,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config=cfg_campaign
+    )
+    selected_rows = camp_select.selection.rows
+    if len(selected_rows) > 0:
+        sel_idx = selected_rows[0]
+        st.session_state.sel_campaign_name = camp_display.iloc[sel_idx]["广告活动名称"]
+        # 切换广告时清空关键词匹配缓存
+        st.session_state.sel_keyword_text = ""
+        st.session_state.sel_match_type_raw = ""
+    else:
+        st.session_state.sel_campaign_name = ""
+        st.session_state.sel_keyword_text = ""
+        st.session_state.sel_match_type_raw = ""
+    st.divider()
 
-                        df_result = pd.DataFrame(final_rows)
-                        if sort_by in df_result.columns:
-                            df_result = df_result.sort_values(by=sort_by, ascending=sort_asc)
-                        st.info(f"【{sheet_name}】有效数据行数：{len(df_result)}")
+    # ===================== 四、当前广告分层明细 =====================
+    st.subheader("四、当前广告分层明细")
+    sel_camp_name = st.session_state.sel_campaign_name
+    if sel_camp_name == "":
+        st.info("请单击上方广告活动表格任意一行选中广告")
+    else:
+        st.markdown(f"<p style='color:#1677ff'>已选中广告：{sel_camp_name}</p>", unsafe_allow_html=True)
+        current_camp_data = df_ad[df_ad["Campaign Name (Informational only)"] == sel_camp_name]
 
-                        # 定位超链接列索引
-                        targeting_col_idx = None
-                        if is_targeting and "Product Targeting Expression" in output_cols:
-                            targeting_col_idx = output_cols.index("Product Targeting Expression") + 1
+        # 1.广告位调价模块 height=180
+        with st.container():
+            bid_data = current_camp_data[current_camp_data["Entity"] == "Bidding Adjustment"]
+            camp_bid_raw = current_camp_data["Bidding Strategy"].drop_duplicates().dropna()
+            bid_cn = bid_name_map[camp_bid_raw.iloc[0]] if len(camp_bid_raw) > 0 else "无"
+            if len(bid_data) > 0:
+                st.markdown("<div class='block-title'>1. 广告位调价 Bidding Adjustment</div>", unsafe_allow_html=True)
+                bid_cols = ["Bidding Strategy","Placement","Percentage","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
+                bid_view = bid_data[bid_cols].copy()
+                bid_view["Bidding Strategy"] = bid_cn
+                bid_view["Placement"] = bid_view["Placement"].map(placement_name_map).fillna(bid_view["Placement"])
+                bid_view["Percentage"] = bid_view["Percentage"].apply(lambda x: f"{float(x):.0f}%" if pd.notna(x) else "0%")
+                bid_view["Click-through Rate"] = bid_view["Click-through Rate"].apply(format_percent)
+                bid_view["Conversion Rate"] = bid_view["Conversion Rate"].apply(format_percent)
+                bid_view["ACOS"] = bid_view["ACOS"].apply(format_percent)
+                bid_view.columns = [
+                    "竞价策略","广告位","百分比","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
+                ]
+                cfg_bid = {c: st.column_config.Column(width="stretch") for c in bid_view.columns}
+                st.dataframe(bid_view, use_container_width=True, height=180, column_config=cfg_bid)
+                st.divider()
 
-                        # 填充数据行
-                        for row_idx, row_data in enumerate(df_result.to_dict("records"), start=2):
-                            for col_idx, col_name in enumerate(output_cols, start=1):
-                                val = row_data.get(col_name, "")
-                                cell = ws.cell(row=row_idx, column=col_idx, value=val)
-                                cell.border = THIN_BORDER
-                                cell.alignment = CENTER_ALIGN
+        # 2.广告组汇总总表
+        with st.container():
+            st.markdown("<div class='block-title'>2. 广告组 Ad Group 汇总</div>", unsafe_allow_html=True)
+            adgroup_df = current_camp_data[current_camp_data["Entity"] == "Ad Group"].copy()
+            if len(adgroup_df) > 0:
+                ag_show_cols = [
+                    "Ad Group Name (Informational only)","State","Impressions","Clicks","Click-through Rate",
+                    "Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"
+                ]
+                ag_view = adgroup_df[ag_show_cols].copy()
+                ag_view["Spend"] = ag_view["Spend"].apply(lambda x: f"${x:.2f}")
+                ag_view["Sales"] = ag_view["Sales"].apply(lambda x: f"${x:.2f}")
+                ag_view["CPC"] = ag_view["CPC"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "$0.00")
+                ag_view["Click-through Rate"] = ag_view["Click-through Rate"].apply(format_percent)
+                ag_view["Conversion Rate"] = ag_view["Conversion Rate"].apply(format_percent)
+                ag_view["ACOS"] = ag_view["ACOS"].apply(format_percent)
+                ag_view["State"] = ag_view["State"].map(status_map).fillna(ag_view["State"])
+                ag_view.columns = [
+                    "广告组名称","投放状态","曝光","点击","点击率",
+                    "花费($)","销售额($)","订单量","Units","转化率","ACOS","CPC","ROAS"
+                ]
+                cfg_ag_total = {c: st.column_config.Column(width="stretch") for c in ag_view.columns}
+                st.dataframe(ag_view, use_container_width=True, height=120, column_config=cfg_ag_total)
+            else:
+                st.info("该广告下无广告组汇总数据")
+            st.divider()
 
-                                # ASIN超链接处理（仅定位广告Sheet执行）
-                                if is_targeting and col_idx == targeting_col_idx and val != "":
-                                    asin_val = extract_asin_from_targeting(val)
-                                    if asin_val:
-                                        excel_formula = f'=HYPERLINK("https://www.amazon.com/dp/{asin_val}","{asin_val}")'
-                                        cell.value = excel_formula
-                                        cell.font = Font(color='0563C1', underline='single')
-                                        cell.alignment = LEFT_ALIGN
+        # 3.广告组细分折叠面板
+        ag_name_list = current_camp_data["Ad Group Name (Informational only)"].drop_duplicates().unique()
+        ag_name_list = [name for name in ag_name_list if name != "无广告组"]
+        if len(ag_name_list) > 0:
+            for ag_name in ag_name_list:
+                ag_data = current_camp_data[current_camp_data["Ad Group Name (Informational only)"] == ag_name]
+                with st.expander(f"广告组：{ag_name}", expanded=False):
+                    # 商品广告
+                    with st.container():
+                        prod = ag_data[ag_data["Entity"] == "Product Ad"]
+                        if len(prod) > 0:
+                            st.markdown("<div class='block-title'>▸ 商品广告 Product Ad</div>", unsafe_allow_html=True)
+                            p_cols = ["Eligibility Status (Informational only)","SKU","ASIN (Informational only)","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
+                            p_view = prod[p_cols].copy()
+                            p_view["Eligibility Status (Informational only)"] = p_view["Eligibility Status (Informational only)"].map(status_map).fillna(p_view["Eligibility Status (Informational only)"])
+                            p_view["Click-through Rate"] = p_view["Click-through Rate"].apply(format_percent)
+                            p_view["Conversion Rate"] = p_view["Conversion Rate"].apply(format_percent)
+                            p_view["ACOS"] = p_view["ACOS"].apply(format_percent)
+                            p_view.columns = [
+                                "投放状态","SKU","ASIN","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
+                            ]
+                            cfg_prod = {c: st.column_config.Column(width="stretch") for c in p_view.columns}
+                            st.dataframe(p_view, use_container_width=True, height=110, column_config=cfg_prod)
+                    # ASIN定位投放
+                    with st.container():
+                        pt = ag_data[ag_data["Entity"] == "Product Targeting"]
+                        if len(pt) > 0:
+                            st.markdown("<div class='block-title'>▸ ASIN定位投放（单击行筛选下方搜索词）</div>", unsafe_allow_html=True)
+                            pt_cols = ["State","Product Targeting Expression","Bid","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
+                            pt_view = pt[pt_cols].copy()
+                            pt_view["State"] = pt_view["State"].map(status_map).fillna(pt_view["State"])
+                            pt_view["Click-through Rate"] = pt_view["Click-through Rate"].apply(format_percent)
+                            pt_view["Conversion Rate"] = pt_view["Conversion Rate"].apply(format_percent)
+                            pt_view["ACOS"] = pt_view["ACOS"].apply(format_percent)
+                            pt_view.columns = [
+                                "投放状态","定位ASIN","出价","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
+                            ]
+                            cfg_pt = {c: st.column_config.Column(width="stretch") for c in pt_view.columns}
+                            pt_click = st.dataframe(
+                                pt_view,
+                                use_container_width=True,
+                                height=110,
+                                on_select="rerun",
+                                selection_mode="single-row",
+                                key=f"pt_{ag_name}",
+                                column_config=cfg_pt
+                            )
+                            sel_tgt_rows = pt_click.selection.rows
+                            if len(sel_tgt_rows) > 0:
+                                st.session_state.sel_keyword_text = ""
+                                st.session_state.sel_match_type_raw = ""
+                    # 投放关键词（核心修改：选中时存储三重匹配字段）
+                    with st.container():
+                        kw = ag_data[ag_data["Entity"] == "Keyword"]
+                        if len(kw) > 0:
+                            st.markdown("<div class='block-title'>▸ 投放关键词（单击行匹配下方客户搜索词）</div>", unsafe_allow_html=True)
+                            kw_cols = ["State","Keyword Text","Match Type","Bid","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
+                            kw_view = kw[kw_cols].copy()
+                            kw_view["State"] = kw_view["State"].map(status_map).fillna(kw_view["State"])
+                            kw_view["Match Type CN"] = kw_view["Match Type"].map(match_type_map)
+                            kw_view["Click-through Rate"] = kw_view["Click-through Rate"].apply(format_percent)
+                            kw_view["Conversion Rate"] = kw_view["Conversion Rate"].apply(format_percent)
+                            kw_view["ACOS"] = kw_view["ACOS"].apply(format_percent)
+                            kw_display_cols = [
+                                "State","Keyword Text","Match Type CN","Bid","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"
+                            ]
+                            kw_display = kw_view[kw_display_cols].copy()
+                            kw_display.columns = [
+                                "投放状态","关键词文本","匹配方式","出价","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
+                            ]
+                            cfg_kw = {c: st.column_config.Column(width="stretch") for c in kw_display.columns}
+                            kw_select = st.dataframe(
+                                kw_display,
+                                use_container_width=True,
+                                height=450,
+                                on_select="rerun",
+                                selection_mode="single-row",
+                                key=f"kw_{ag_name}",
+                                column_config=cfg_kw
+                            )
+                            sel_kw_rows = kw_select.selection.rows
+                            if len(sel_kw_rows) > 0:
+                                sel_kw_idx = sel_kw_rows[0]
+                                # 存储三重匹配条件：广告活动、关键词原文、原始匹配类型英文
+                                st.session_state.sel_keyword_text = kw_view.iloc[sel_kw_idx]["Keyword Text"]
+                                st.session_state.sel_match_type_raw = kw_view.iloc[sel_kw_idx]["Match Type"]
+                    # 否定ASIN
+                    with st.container():
+                        neg_pt = ag_data[ag_data["Entity"] == "Negative Product Targeting"]
+                        if len(neg_pt) > 0:
+                            st.markdown("<div class='block-title'>▸ 否定ASIN</div>", unsafe_allow_html=True)
+                            neg_pt_cols = ["State","Product Targeting Expression","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
+                            neg_pt_view = neg_pt[neg_pt_cols].copy()
+                            neg_pt_view["State"] = neg_pt_view["State"].map(status_map).fillna(neg_pt_view["State"])
+                            neg_pt_view["Click-through Rate"] = neg_pt_view["Click-through Rate"].apply(format_percent)
+                            neg_pt_view["Conversion Rate"] = neg_pt_view["Conversion Rate"].apply(format_percent)
+                            neg_pt_view["ACOS"] = neg_pt_view["ACOS"].apply(format_percent)
+                            neg_pt_view.columns = [
+                                "投放状态","否定ASIN","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
+                            ]
+                            cfg_neg_tgt = {c: st.column_config.Column(width="stretch") for c in neg_pt_view.columns}
+                            st.dataframe(neg_pt_view, use_container_width=True, height=80, column_config=cfg_neg_tgt)
+                    # 否定关键词（默认折叠）
+                    with st.container():
+                        neg_kw = ag_data[ag_data["Entity"] == "Negative Keyword"]
+                        if len(neg_kw) > 0:
+                            with st.expander("▸ 否定关键词", expanded=False):
+                                neg_kw_cols = ["State","Keyword Text","Match Type","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
+                                neg_kw_view = neg_kw[neg_kw_cols].copy()
+                                neg_kw_view["State"] = neg_kw_view["State"].map(status_map).fillna(neg_kw_view["State"])
+                                neg_kw_view["Match Type"] = neg_kw_view["Match Type"].map(match_type_map).fillna(neg_kw_view["Match Type"])
+                                neg_kw_view["Click-through Rate"] = neg_kw_view["Click-through Rate"].apply(format_percent)
+                                neg_kw_view["Conversion Rate"] = neg_kw_view["Conversion Rate"].apply(format_percent)
+                                neg_kw_view["ACOS"] = neg_kw_view["ACOS"].apply(format_percent)
+                                neg_kw_view.columns = [
+                                    "投放状态","否定关键词","匹配方式","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
+                                ]
+                                cfg_neg_kw = {c: st.column_config.Column(width="stretch") for c in neg_kw_view.columns}
+                                st.dataframe(neg_kw_view, use_container_width=True, height=450, column_config=cfg_neg_kw)
+                st.divider()
+        else:
+            st.info("该广告无细分广告组数据")
+    st.divider()
 
-                                # 数字格式处理
-                                if val != "" and isinstance(val, (int, float)):
-                                    if col_name in ["ACOS", "Click-through Rate", "Conversion Rate"]:
-                                        cell.number_format = PCT_FMT
-                                    elif col_name in ["Spend", "Sales", "CPC", "ROAS", "Percentage", "Bid"]:
-                                        cell.number_format = NUMBER_FMT
-
-                        auto_fit_columns(ws)
-                        ws.freeze_panes = "A2"
-                        del df_result, final_rows, filter_df
-                    del df_origin
-
-                output_buf.seek(0)
-                st.success("✅ 全部自定义Sheet报表生成完成！")
-                st.download_button(
-                    label="📥 下载完整Excel文件",
-                    data=output_buf.getvalue(),
-                    file_name=f"SP广告自定义报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-            except Exception as err:
-                st.error(f"生成失败，错误详情：{str(err)}")
+    # ===================== 五、客户搜索词明细【修复三重严格匹配】 =====================
+    with st.container():
+        st.subheader("五、客户搜索词明细（匹配上方关键词/ASIN自动过滤）")
+        user_search_input = st.text_input("手动搜索客户词")
+        if df_search is not None:
+            st_raw = df_search.copy()
+            # 1. 固定匹配当前选中广告活动
+            if sel_camp_name != "" and "Campaign Name" in st_raw.columns:
+                st_raw = st_raw[st_raw["Campaign Name"] == sel_camp_name]
+            # 2. 三重严格匹配：关键词文本完全相等 + 匹配类型英文完全相等
+            kw_text = st.session_state.sel_keyword_text
+            match_raw = st.session_state.sel_match_type_raw
+            if kw_text != "" and match_raw != "":
+                st_raw = st_raw[(st_raw["Keyword Text"] == kw_text) & (st_raw["Match Type"] == match_raw)]
+            # 3. 手动文本检索（模糊包含）
+            if user_search_input.strip() != "":
+                search_col = "Customer Search Term" if "Customer Search Term" in st_raw.columns else "Search Term"
+                st_raw = st_raw[st_raw[search_col].str.contains(user_search_input, na=False, case=False)]
+            # 花费降序
+            if len(st_raw) > 0 and "Spend" in st_raw.columns:
+                st_raw = st_raw.sort_values("Spend", ascending=False, ignore_index=True)
+            # 展示字段
+            origin_search_col = "Customer Search Term" if "Customer Search Term" in st_raw.columns else "Search Term"
+            display_cols = [
+                origin_search_col,
+                "Match Type","Keyword Text","Impressions","Clicks",
+                "Click-through Rate","Spend","Sales","Orders","Units",
+                "Conversion Rate","ACOS","CPC","ROAS"
+            ]
+            show_df = st_raw[display_cols].copy()
+            show_df["Match Type"] = show_df["Match Type"].map(match_type_map).fillna("无")
+            show_df["Click-through Rate"] = show_df["Click-through Rate"].apply(format_percent)
+            show_df["Conversion Rate"] = show_df["Conversion Rate"].apply(format_percent)
+            show_df["ACOS"] = show_df["ACOS"].apply(format_percent)
+            show_df.columns = [
+                "客户搜索词","匹配方式","投放关键词","曝光","点击",
+                "点击率","花费($)","销售额($)","订单量","Units",
+                "转化率","ACOS","CPC","ROAS"
+            ]
+            cfg_search = {c: st.column_config.Column(width="stretch") for c in show_df.columns}
+            if len(show_df) > 0:
+                st.dataframe(show_df, use_container_width=True, height=400, column_config=cfg_search)
+            else:
+                st.warning("无匹配的客户搜索词数据")
+        else:
+            st.info("未上传SP Search Term报表文件")
+else:
+    st.info("请上传包含Sponsored Products Campaigns工作表的Excel文件")
