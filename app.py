@@ -52,18 +52,21 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 会话缓存初始化（新增存储关键词三重匹配字段）
+# 会话缓存初始化（新增存储关键词三重匹配字段 + 定投表达式缓存）
 if "df_ad" not in st.session_state:
     st.session_state.df_ad = None
 if "df_search" not in st.session_state:
     st.session_state.df_search = None
 if "sel_campaign_name" not in st.session_state:
     st.session_state.sel_campaign_name = ""
-# 三重匹配缓存
+# 关键词三重匹配缓存
 if "sel_keyword_text" not in st.session_state:
     st.session_state.sel_keyword_text = ""
 if "sel_match_type_raw" not in st.session_state:
     st.session_state.sel_match_type_raw = ""
+# ASIN定投匹配缓存
+if "sel_target_expr" not in st.session_state:
+    st.session_state.sel_target_expr = ""
 
 # ===================== 页面顶部：主标题 + 文件上传 =====================
 st.title("📊 亚马逊SP广告看板｜原始明细匹配工具")
@@ -113,8 +116,8 @@ def format_percent(x):
     return f"{x:.2%}"
 
 if df_ad is not None:
-    # ===================== 一、投放总览（顶部，仅统计Entity=Campaign，两行3卡片） =====================
-    st.subheader("一、投放总览（全局合计）")
+    # ===================== 一、全账户投放总览（顶部，仅统计Entity=Campaign，两行3卡片） =====================
+    st.subheader("一、全账户投放总览（全局合计）")
     filter_df = df_ad.copy()
     camp_only_data = filter_df[filter_df["Entity"] == "Campaign"].copy()
     sum_imp = camp_only_data["Impressions"].sum()
@@ -228,13 +231,15 @@ if df_ad is not None:
     if len(selected_rows) > 0:
         sel_idx = selected_rows[0]
         st.session_state.sel_campaign_name = camp_display.iloc[sel_idx]["广告活动名称"]
-        # 切换广告时清空关键词匹配缓存
+        # 切换广告时清空关键词+定投全部匹配缓存
         st.session_state.sel_keyword_text = ""
         st.session_state.sel_match_type_raw = ""
+        st.session_state.sel_target_expr = ""
     else:
         st.session_state.sel_campaign_name = ""
         st.session_state.sel_keyword_text = ""
         st.session_state.sel_match_type_raw = ""
+        st.session_state.sel_target_expr = ""
     st.divider()
 
     # ===================== 四、当前广告分层明细 =====================
@@ -318,7 +323,7 @@ if df_ad is not None:
                             ]
                             cfg_prod = {c: st.column_config.Column(width="stretch") for c in p_view.columns}
                             st.dataframe(p_view, use_container_width=True, height=110, column_config=cfg_prod)
-                    # ASIN定位投放
+                    # ASIN定位投放（新增：选中存储定投表达式，清空关键词缓存）
                     with st.container():
                         pt = ag_data[ag_data["Entity"] == "Product Targeting"]
                         if len(pt) > 0:
@@ -344,8 +349,10 @@ if df_ad is not None:
                             )
                             sel_tgt_rows = pt_click.selection.rows
                             if len(sel_tgt_rows) > 0:
+                                # 清空关键词缓存，存入定投表达式
                                 st.session_state.sel_keyword_text = ""
                                 st.session_state.sel_match_type_raw = ""
+                                st.session_state.sel_target_expr = pt_view.iloc[sel_tgt_rows[0]]["定位ASIN"]
                     # 投放关键词（核心修改：选中时存储三重匹配字段）
                     with st.container():
                         kw = ag_data[ag_data["Entity"] == "Keyword"]
@@ -379,6 +386,7 @@ if df_ad is not None:
                             if len(sel_kw_rows) > 0:
                                 sel_kw_idx = sel_kw_rows[0]
                                 # 存储三重匹配条件：广告活动、关键词原文、原始匹配类型英文
+                                st.session_state.sel_target_expr = ""
                                 st.session_state.sel_keyword_text = kw_view.iloc[sel_kw_idx]["Keyword Text"]
                                 st.session_state.sel_match_type_raw = kw_view.iloc[sel_kw_idx]["Match Type"]
                     # 否定ASIN
@@ -419,21 +427,34 @@ if df_ad is not None:
             st.info("该广告无细分广告组数据")
     st.divider()
 
-    # ===================== 五、客户搜索词明细【修复三重严格匹配】 =====================
+    # ===================== 五、客户搜索词明细【修正：定投双条件同时过滤】 =====================
     with st.container():
         st.subheader("五、客户搜索词明细（匹配上方关键词/ASIN自动过滤）")
         user_search_input = st.text_input("手动搜索客户词")
         if df_search is not None:
             st_raw = df_search.copy()
-            # 1. 固定匹配当前选中广告活动
-            if sel_camp_name != "" and "Campaign Name" in st_raw.columns:
-                st_raw = st_raw[st_raw["Campaign Name"] == sel_camp_name]
-            # 2. 三重严格匹配：关键词文本完全相等 + 匹配类型英文完全相等
             kw_text = st.session_state.sel_keyword_text
             match_raw = st.session_state.sel_match_type_raw
+            target_expr = st.session_state.sel_target_expr
+            camp_name = sel_camp_name
+
+            # 分支匹配逻辑
             if kw_text != "" and match_raw != "":
-                st_raw = st_raw[(st_raw["Keyword Text"] == kw_text) & (st_raw["Match Type"] == match_raw)]
-            # 3. 手动文本检索（模糊包含）
+                # 关键词三重严格匹配
+                if "Campaign Name (Informational only)" in st_raw.columns:
+                    st_raw = st_raw[st_raw["Campaign Name (Informational only)"] == camp_name]
+                if "Keyword Text" in st_raw.columns and "Match Type" in st_raw.columns:
+                    st_raw = st_raw[(st_raw["Keyword Text"] == kw_text) & (st_raw["Match Type"] == match_raw)]
+            elif target_expr != "":
+                # ASIN定投双重精确匹配（完全按你的规则）
+                # 第一层：广告活动完全相等
+                if "Campaign Name (Informational only)" in st_raw.columns:
+                    st_raw = st_raw[st_raw["Campaign Name (Informational only)"] == camp_name]
+                # 第二层：定投表达式完全相等
+                if "Product Targeting Expression" in st_raw.columns:
+                    st_raw = st_raw[st_raw["Product Targeting Expression"] == target_expr]
+
+            # 手动文本检索（模糊包含）
             if user_search_input.strip() != "":
                 search_col = "Customer Search Term" if "Customer Search Term" in st_raw.columns else "Search Term"
                 st_raw = st_raw[st_raw[search_col].str.contains(user_search_input, na=False, case=False)]
@@ -444,20 +465,40 @@ if df_ad is not None:
             origin_search_col = "Customer Search Term" if "Customer Search Term" in st_raw.columns else "Search Term"
             display_cols = [
                 origin_search_col,
-                "Match Type","Keyword Text","Impressions","Clicks",
+                "Match Type","Keyword Text","Product Targeting Expression","Impressions","Clicks",
                 "Click-through Rate","Spend","Sales","Orders","Units",
                 "Conversion Rate","ACOS","CPC","ROAS"
             ]
+            # 只保留报表存在的列，防止报错
+            display_cols = [c for c in display_cols if c in st_raw.columns]
             show_df = st_raw[display_cols].copy()
-            show_df["Match Type"] = show_df["Match Type"].map(match_type_map).fillna("无")
-            show_df["Click-through Rate"] = show_df["Click-through Rate"].apply(format_percent)
-            show_df["Conversion Rate"] = show_df["Conversion Rate"].apply(format_percent)
-            show_df["ACOS"] = show_df["ACOS"].apply(format_percent)
-            show_df.columns = [
-                "客户搜索词","匹配方式","投放关键词","曝光","点击",
-                "点击率","花费($)","销售额($)","订单量","Units",
-                "转化率","ACOS","CPC","ROAS"
-            ]
+            # 格式化
+            if "Match Type" in show_df.columns:
+                show_df["Match Type"] = show_df["Match Type"].map(match_type_map).fillna("无")
+            pct_fields = ["Click-through Rate","Conversion Rate","ACOS"]
+            for f in pct_fields:
+                if f in show_df.columns:
+                    show_df[f] = show_df[f].apply(format_percent)
+            # 中文表头映射
+            name_map = {
+                origin_search_col:"客户搜索词",
+                "Match Type":"匹配方式",
+                "Keyword Text":"投放关键词",
+                "Product Targeting Expression":"定投表达式",
+                "Impressions":"曝光",
+                "Clicks":"点击",
+                "Click-through Rate":"点击率",
+                "Spend":"花费($)",
+                "Sales":"销售额($)",
+                "Orders":"订单量",
+                "Units":"Units",
+                "Conversion Rate":"转化率",
+                "ACOS":"ACOS",
+                "CPC":"CPC",
+                "ROAS":"ROAS"
+            }
+            new_header = [name_map[c] for c in display_cols]
+            show_df.columns = new_header
             cfg_search = {c: st.column_config.Column(width="stretch") for c in show_df.columns}
             if len(show_df) > 0:
                 st.dataframe(show_df, use_container_width=True, height=400, column_config=cfg_search)
