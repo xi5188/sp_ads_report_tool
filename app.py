@@ -41,6 +41,13 @@ match_type_map = {
     "Negative Exact": "否定精准",
     "None": "无"
 }
+# 新增：定投类目表达式中英映射
+target_expr_map = {
+    "close-match": "紧密匹配",
+    "loose-match": "宽泛匹配",
+    "complements": "关联商品",
+    "substitutes": "同类商品"
+}
 
 # 页面基础配置
 st.set_page_config(page_title="亚马逊SP广告数据看板", layout="wide", page_icon="📊")
@@ -295,7 +302,7 @@ if df_ad is not None:
                     "花费($)","销售额($)","订单量","Units","转化率","ACOS","CPC","ROAS"
                 ]
                 cfg_ag_total = {c: st.column_config.Column(width="stretch") for c in ag_view.columns}
-                st.dataframe(ag_view, use_container_width=True, height=120, column_config=cfg_ag_total)
+                st.dataframe(ag_view, use_container_width=True, height=110, column_config=cfg_ag_total)
             else:
                 st.info("该广告下无广告组汇总数据")
             st.divider()
@@ -323,7 +330,7 @@ if df_ad is not None:
                             ]
                             cfg_prod = {c: st.column_config.Column(width="stretch") for c in p_view.columns}
                             st.dataframe(p_view, use_container_width=True, height=110, column_config=cfg_prod)
-                    # ASIN定位投放（新增：选中存储定投表达式，清空关键词缓存）
+                    # ASIN定位投放（新增：表格翻译定投类目，缓存取值从原始pt拿英文原值）
                     with st.container():
                         pt = ag_data[ag_data["Entity"] == "Product Targeting"]
                         if len(pt) > 0:
@@ -331,6 +338,8 @@ if df_ad is not None:
                             pt_cols = ["State","Product Targeting Expression","Bid","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
                             pt_view = pt[pt_cols].copy()
                             pt_view["State"] = pt_view["State"].map(status_map).fillna(pt_view["State"])
+                            # 定投表达式翻译为中文展示
+                            pt_view["Product Targeting Expression"] = pt_view["Product Targeting Expression"].map(target_expr_map).fillna(pt_view["Product Targeting Expression"])
                             pt_view["Click-through Rate"] = pt_view["Click-through Rate"].apply(format_percent)
                             pt_view["Conversion Rate"] = pt_view["Conversion Rate"].apply(format_percent)
                             pt_view["ACOS"] = pt_view["ACOS"].apply(format_percent)
@@ -341,7 +350,7 @@ if df_ad is not None:
                             pt_click = st.dataframe(
                                 pt_view,
                                 use_container_width=True,
-                                height=110,
+                                height=180,
                                 on_select="rerun",
                                 selection_mode="single-row",
                                 key=f"pt_{ag_name}",
@@ -349,10 +358,11 @@ if df_ad is not None:
                             )
                             sel_tgt_rows = pt_click.selection.rows
                             if len(sel_tgt_rows) > 0:
-                                # 清空关键词缓存，存入定投表达式
+                                # 清空关键词缓存
                                 st.session_state.sel_keyword_text = ""
                                 st.session_state.sel_match_type_raw = ""
-                                st.session_state.sel_target_expr = pt_view.iloc[sel_tgt_rows[0]]["定位ASIN"]
+                                # 从原始pt表取未翻译英文原值，用于搜索词匹配
+                                st.session_state.sel_target_expr = pt.iloc[sel_tgt_rows[0]]["Product Targeting Expression"]
                     # 投放关键词（核心修改：选中时存储三重匹配字段）
                     with st.container():
                         kw = ag_data[ag_data["Entity"] == "Keyword"]
@@ -389,11 +399,10 @@ if df_ad is not None:
                                 st.session_state.sel_target_expr = ""
                                 st.session_state.sel_keyword_text = kw_view.iloc[sel_kw_idx]["Keyword Text"]
                                 st.session_state.sel_match_type_raw = kw_view.iloc[sel_kw_idx]["Match Type"]
-                    # 否定ASIN
-                    with st.container():
-                        neg_pt = ag_data[ag_data["Entity"] == "Negative Product Targeting"]
-                        if len(neg_pt) > 0:
-                            st.markdown("<div class='block-title'>▸ 否定ASIN</div>", unsafe_allow_html=True)
+                    # 否定ASIN（默认折叠，无数据自动隐藏）
+                    neg_pt = ag_data[ag_data["Entity"] == "Negative Product Targeting"]
+                    if len(neg_pt) > 0:
+                        with st.expander("▸ 否定ASIN", expanded=False):
                             neg_pt_cols = ["State","Product Targeting Expression","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
                             neg_pt_view = neg_pt[neg_pt_cols].copy()
                             neg_pt_view["State"] = neg_pt_view["State"].map(status_map).fillna(neg_pt_view["State"])
@@ -404,8 +413,8 @@ if df_ad is not None:
                                 "投放状态","否定ASIN","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
                             ]
                             cfg_neg_tgt = {c: st.column_config.Column(width="stretch") for c in neg_pt_view.columns}
-                            st.dataframe(neg_pt_view, use_container_width=True, height=80, column_config=cfg_neg_tgt)
-                    # 否定关键词（默认折叠）
+                            st.dataframe(neg_pt_view, use_container_width=True, height=180, column_config=cfg_neg_tgt)
+                    # 否定关键词（默认折叠，无数据自动隐藏）
                     with st.container():
                         neg_kw = ag_data[ag_data["Entity"] == "Negative Keyword"]
                         if len(neg_kw) > 0:
@@ -421,13 +430,13 @@ if df_ad is not None:
                                     "投放状态","否定关键词","匹配方式","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
                                 ]
                                 cfg_neg_kw = {c: st.column_config.Column(width="stretch") for c in neg_kw_view.columns}
-                                st.dataframe(neg_kw_view, use_container_width=True, height=450, column_config=cfg_neg_kw)
+                                st.dataframe(neg_kw_view, use_container_width=True, height=180, column_config=cfg_neg_kw)
                 st.divider()
         else:
             st.info("该广告无细分广告组数据")
     st.divider()
 
-    # ===================== 五、客户搜索词明细【修正：定投双条件同时过滤】 =====================
+    # ===================== 五、客户搜索词明细【修正：定投双条件同时过滤 + 定投表达式中文翻译】 =====================
     with st.container():
         st.subheader("五、客户搜索词明细（匹配上方关键词/ASIN自动过滤）")
         user_search_input = st.text_input("手动搜索客户词")
@@ -475,6 +484,9 @@ if df_ad is not None:
             # 格式化
             if "Match Type" in show_df.columns:
                 show_df["Match Type"] = show_df["Match Type"].map(match_type_map).fillna("无")
+            # 新增：定投表达式中英转换
+            if "Product Targeting Expression" in show_df.columns:
+                show_df["Product Targeting Expression"] = show_df["Product Targeting Expression"].map(target_expr_map).fillna(show_df["Product Targeting Expression"])
             pct_fields = ["Click-through Rate","Conversion Rate","ACOS"]
             for f in pct_fields:
                 if f in show_df.columns:
@@ -506,5 +518,3 @@ if df_ad is not None:
                 st.warning("无匹配的客户搜索词数据")
         else:
             st.info("未上传SP Search Term报表文件")
-else:
-    st.info("请上传包含Sponsored Products Campaigns工作表的Excel文件")
