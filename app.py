@@ -386,7 +386,7 @@ if df_ad is not None:
                             kw_select = st.dataframe(
                                 kw_display,
                                 use_container_width=True,
-                                height=450,
+                                height=400,
                                 on_select="rerun",
                                 selection_mode="single-row",
                                 key=f"kw_{ag_name}",
