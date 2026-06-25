@@ -49,6 +49,91 @@ target_expr_map = {
     "substitutes": "同类商品"
 }
 
+# 文件读取缓存函数（大文件优化核心）
+@st.cache_data(max_entries=5, ttl=3600)
+def read_sp_excel(file_obj):
+    sheets = pd.read_excel(file_obj, sheet_name=None)
+    df_ad = None
+    df_search = None
+
+    # ========== 广告表：仅加载代码用到的字段，剔除无用列 ==========
+    if "Sponsored Products Campaigns" in sheets:
+        raw_ad = sheets["Sponsored Products Campaigns"]
+        raw_ad.columns = raw_ad.columns.str.strip()
+        # 程序全部用到的列，多余列直接丢弃
+        keep_ad_cols = [
+            "Portfolio Name (Informational only)",
+            "Campaign Name (Informational only)",
+            "Ad Group Name (Informational only)",
+            "Entity",
+            "State",
+            "Daily Budget",
+            "Bidding Strategy",
+            "Placement",
+            "Percentage",
+            "Bid",
+            "Product Targeting Expression",
+            "Keyword Text",
+            "Match Type",
+            "Eligibility Status (Informational only)",
+            "SKU",
+            "ASIN (Informational only)",
+            "Impressions",
+            "Clicks",
+            "Spend",
+            "Sales",
+            "Orders",
+            "Units",
+            "Click-through Rate",
+            "Conversion Rate",
+            "ACOS",
+            "CPC",
+            "ROAS"
+        ]
+        # 过滤掉报表不存在的列，防止报错
+        use_cols_ad = [col for col in keep_ad_cols if col in raw_ad.columns]
+        raw_ad = raw_ad[use_cols_ad].copy()
+        # 数值统一转换
+        num_cols = ["Impressions","Clicks","Spend","Sales","Orders","Units","Percentage","Bid","Click-through Rate","Conversion Rate","ACOS","CPC","ROAS"]
+        for c in num_cols:
+            if c in raw_ad.columns:
+                raw_ad[c] = pd.to_numeric(raw_ad[c], errors="coerce").fillna(0)
+        raw_ad["Ad Group Name (Informational only)"] = raw_ad["Ad Group Name (Informational only)"].fillna("无广告组")
+        df_ad = raw_ad
+
+    # ========== 搜索词表：精简字段 ==========
+    if "SP Search Term Report" in sheets:
+        raw_st = sheets["SP Search Term Report"]
+        raw_st.columns = raw_st.columns.str.strip()
+        keep_st_cols = [
+            "Campaign Name (Informational only)",
+            "Campaign Name",
+            "Keyword Text",
+            "Match Type",
+            "Product Targeting Expression",
+            "Customer Search Term",
+            "Search Term",
+            "Impressions",
+            "Clicks",
+            "Spend",
+            "Sales",
+            "Orders",
+            "Units",
+            "Click-through Rate",
+            "Conversion Rate",
+            "ACOS",
+            "CPC",
+            "ROAS"
+        ]
+        use_cols_st = [col for col in keep_st_cols if col in raw_st.columns]
+        raw_st = raw_st[use_cols_st].copy()
+        search_num = ["Impressions","Clicks","Spend","Sales","Orders","Units","Click-through Rate","Conversion Rate","ACOS","CPC","ROAS"]
+        for c in search_num:
+            if c in raw_st.columns:
+                raw_st[c] = pd.to_numeric(raw_st[c], errors="coerce").fillna(0)
+        df_search = raw_st
+    return df_ad, df_search
+
 # 页面基础配置
 st.set_page_config(page_title="亚马逊SP广告数据看板", layout="wide", page_icon="📊")
 st.markdown("""
@@ -82,30 +167,17 @@ st.divider()
 upload_xlsx = st.file_uploader("上传Excel文件（Sponsored Products Campaigns + SP Search Term Report）", type=["xlsx"])
 if upload_xlsx:
     try:
-        sheets = pd.read_excel(upload_xlsx, sheet_name=None)
-        # 广告活动数据表
-        if "Sponsored Products Campaigns" in sheets:
-            df_raw = sheets["Sponsored Products Campaigns"]
-            df_raw.columns = df_raw.columns.str.strip()
-            num_cols = ["Impressions","Clicks","Spend","Sales","Orders","Units","Percentage","Bid","Click-through Rate","Conversion Rate","ACOS","CPC","ROAS"]
-            for c in num_cols:
-                if c in df_raw.columns:
-                    df_raw[c] = pd.to_numeric(df_raw[c], errors="coerce").fillna(0)
-            df_raw["Ad Group Name (Informational only)"] = df_raw["Ad Group Name (Informational only)"].fillna("无广告组")
-            st.session_state.df_ad = df_raw
+        # 调用缓存函数解析文件，重复上传相同文件不会重复解析
+        df_raw_ad, df_raw_search = read_sp_excel(upload_xlsx)
+
+        if df_raw_ad is not None:
+            st.session_state.df_ad = df_raw_ad
             st.success("✅ 广告明细加载完成")
         else:
             st.error("缺少工作表：Sponsored Products Campaigns")
-        # 客户搜索词数据表
-        df_search = None
-        if "SP Search Term Report" in sheets:
-            df_search = sheets["SP Search Term Report"]
-            df_search.columns = [col.strip() for col in df_search.columns]
-            search_num = ["Impressions","Clicks","Spend","Sales","Orders","Units","Click-through Rate","Conversion Rate","ACOS","CPC","ROAS"]
-            for c in search_num:
-                if c in df_search.columns:
-                    df_search[c] = pd.to_numeric(df_search[c], errors="coerce").fillna(0)
-            st.session_state.df_search = df_search
+
+        st.session_state.df_search = df_raw_search
+        if df_raw_search is not None:
             st.success("✅ 搜索词报表加载完成")
         else:
             st.warning("未上传SP Search Term Report，搜索词模块隐藏")
@@ -415,22 +487,21 @@ if df_ad is not None:
                             cfg_neg_tgt = {c: st.column_config.Column(width="stretch") for c in neg_pt_view.columns}
                             st.dataframe(neg_pt_view, use_container_width=True, height=180, column_config=cfg_neg_tgt)
                     # 否定关键词（默认折叠，无数据自动隐藏）
-                    with st.container():
-                        neg_kw = ag_data[ag_data["Entity"] == "Negative Keyword"]
-                        if len(neg_kw) > 0:
-                            with st.expander("▸ 否定关键词", expanded=False):
-                                neg_kw_cols = ["State","Keyword Text","Match Type","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
-                                neg_kw_view = neg_kw[neg_kw_cols].copy()
-                                neg_kw_view["State"] = neg_kw_view["State"].map(status_map).fillna(neg_kw_view["State"])
-                                neg_kw_view["Match Type"] = neg_kw_view["Match Type"].map(match_type_map).fillna(neg_kw_view["Match Type"])
-                                neg_kw_view["Click-through Rate"] = neg_kw_view["Click-through Rate"].apply(format_percent)
-                                neg_kw_view["Conversion Rate"] = neg_kw_view["Conversion Rate"].apply(format_percent)
-                                neg_kw_view["ACOS"] = neg_kw_view["ACOS"].apply(format_percent)
-                                neg_kw_view.columns = [
-                                    "投放状态","否定关键词","匹配方式","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
-                                ]
-                                cfg_neg_kw = {c: st.column_config.Column(width="stretch") for c in neg_kw_view.columns}
-                                st.dataframe(neg_kw_view, use_container_width=True, height=180, column_config=cfg_neg_kw)
+                    neg_kw = ag_data[ag_data["Entity"] == "Negative Keyword"]
+                    if len(neg_kw) > 0:
+                        with st.expander("▸ 否定关键词", expanded=False):
+                            neg_kw_cols = ["State","Keyword Text","Match Type","Impressions","Clicks","Click-through Rate","Spend","Sales","Orders","Units","Conversion Rate","ACOS","CPC","ROAS"]
+                            neg_kw_view = neg_kw[neg_kw_cols].copy()
+                            neg_kw_view["State"] = neg_kw_view["State"].map(status_map).fillna(neg_kw_view["State"])
+                            neg_kw_view["Match Type"] = neg_kw_view["Match Type"].map(match_type_map).fillna(neg_kw_view["Match Type"])
+                            neg_kw_view["Click-through Rate"] = neg_kw_view["Click-through Rate"].apply(format_percent)
+                            neg_kw_view["Conversion Rate"] = neg_kw_view["Conversion Rate"].apply(format_percent)
+                            neg_kw_view["ACOS"] = neg_kw_view["ACOS"].apply(format_percent)
+                            neg_kw_view.columns = [
+                                "投放状态","否定关键词","匹配方式","曝光","点击","点击率","花费($)","销售额($)","订单量","销量","转化率","ACOS","CPC","ROAS"
+                            ]
+                            cfg_neg_kw = {c: st.column_config.Column(width="stretch") for c in neg_kw_view.columns}
+                            st.dataframe(neg_kw_view, use_container_width=True, height=180, column_config=cfg_neg_kw)
                 st.divider()
         else:
             st.info("该广告无细分广告组数据")
