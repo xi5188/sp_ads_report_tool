@@ -229,7 +229,7 @@ if df_ad is not None:
     camp_select = st.dataframe(
         camp_display,
         use_container_width=True,
-        height=400,
+        height=390,
         on_select="rerun",
         selection_mode="single-row",
         column_config=cfg_campaign
@@ -513,7 +513,7 @@ if df_ad is not None:
             show_df.columns = new_header
             cfg_search = {c: st.column_config.Column(width="stretch") for c in show_df.columns}
             if len(show_df) > 0:
-                st.dataframe(show_df, use_container_width=True, height=400, column_config=cfg_search)
+                st.dataframe(show_df, use_container_width=True, height=390, column_config=cfg_search)
             else:
                 st.warning("无匹配的客户搜索词数据")
         else:
