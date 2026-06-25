@@ -229,7 +229,7 @@ if df_ad is not None:
     camp_select = st.dataframe(
         camp_display,
         use_container_width=True,
-        height=390,
+        height=400,
         on_select="rerun",
         selection_mode="single-row",
         column_config=cfg_campaign
@@ -386,7 +386,7 @@ if df_ad is not None:
                             kw_select = st.dataframe(
                                 kw_display,
                                 use_container_width=True,
-                                height=400,
+                                height=390,
                                 on_select="rerun",
                                 selection_mode="single-row",
                                 key=f"kw_{ag_name}",
